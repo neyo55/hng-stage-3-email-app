@@ -1,0 +1,309 @@
+STEP 1
+I created a directory named `Email Project` and then created the following files:
+
+app.py
+
+tasks.py
+
+.env 
+
+
+STEP 2
+
+Then i wrote the bellow script in the task.py, app.py and celery commands in the file as app.py
+
+app.py and celery commands in the file as app.py
+
+##################
+import os
+import logging
+from flask import Flask, request, jsonify
+from datetime import datetime
+from dotenv import load_dotenv
+from celery import Celery
+from tasks import send_email
+from celery.result import AsyncResult
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Initialize Flask app
+app = Flask(__name__)
+
+# Configure Celery
+celery = Celery(
+    __name__,
+    broker=os.getenv('CELERY_BROKER_URL'),
+    backend=os.getenv('CELERY_RESULT_BACKEND')
+)
+
+# Configure logging
+log_path = '/var/log/messaging_system.log'
+print(f"Log file path: {log_path}")
+
+logging.basicConfig(
+    filename=log_path,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.DEBUG,  # Set to DEBUG to capture all log levels
+    filemode='a'  # Append mode to prevent overwriting
+)
+
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)  # Set to DEBUG to capture all log levels
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+logging.getLogger().addHandler(console_handler)
+
+print("Logging is configured")
+
+@app.route('/')
+def index():
+    logging.info('Accessed index route.')
+    print('Accessed index route.')
+    sendmail = request.args.get('sendmail')
+    talktome = request.args.get('talktome')
+
+    if sendmail and talktome:
+        task = send_email.delay(sendmail)
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logging.info(f'Email task queued with task id: {task.id}')
+        print(f'Email task queued with task id: {task.id}')
+        return jsonify({
+            'message': 'Email task has been queued.',
+            'task_id': task.id
+        }), 200
+    logging.warning('Both sendmail and talktome parameters are required.')
+    print('Both sendmail and talktome parameters are required.')
+    return 'Both sendmail and talktome parameters are required.', 400
+
+@app.route('/task_status/<task_id>')
+def get_task_status(task_id):
+    result = AsyncResult(task_id, app=celery)
+    logging.info(f'Checking status for task id: {task_id}')
+    print(f'Checking status for task id: {task_id}')
+    status = result.state
+    logging.info(f'Task status for {task_id}: {status}')
+    print(f'Task status for {task_id}: {status}')
+
+    if status == 'SUCCESS':
+        result_data = result.result
+        logging.info(f'Email sent successfully to {result_data["email"]}')
+        print(f'Email sent successfully to {result_data["email"]}')
+        return jsonify({
+            'status': 'SUCCESS',
+            'message': f'Email sent successfully to {result_data["email"]}'
+        }), 200
+    elif status == 'FAILURE':
+        result_data = result.result
+        logging.error(f'Failed to send email: {result_data["error"]}')
+        print(f'Failed to send email: {result_data["error"]}')
+        return jsonify({
+            'status': 'FAILURE',
+            'message': f'Failed to send email: {result_data["error"]}'
+        }), 400
+    elif status in ['PENDING', 'RECEIVED', 'STARTED']:
+        logging.info('Email sending in progress')
+        print('Email sending in progress')
+        return jsonify({
+            'status': 'PENDING',
+            'message': 'Email sending in progress'
+        }), 202
+    else:
+        logging.warning('Task status unknown')
+        print('Task status unknown')
+        return jsonify({
+            'status': 'UNKNOWN',
+            'message': 'Task status unknown'
+        }), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
+
+###########################
+
+# tasks.py
+
+import os
+import smtplib
+import logging
+from celery import Celery
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Configure Celery
+celery = Celery(
+    'tasks',
+    broker=os.getenv('CELERY_BROKER_URL'),
+    backend=os.getenv('CELERY_RESULT_BACKEND')
+)
+
+EMAIL = os.getenv('EMAIL')
+PASSWORD = os.getenv('PASSWORD')
+SMTP_SERVER = os.getenv('SMTP_SERVER')
+SMTP_PORT = int(os.getenv('SMTP_PORT'))
+
+# Configure logging
+log_path = '/var/log/messaging_system.log'
+print(f"Log file path: {log_path}")
+
+logging.basicConfig(
+    filename=log_path,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.DEBUG,  # Set to DEBUG to capture all log levels
+    filemode='a'  # Append mode to prevent overwriting
+)
+
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)  # Set to DEBUG to capture all log levels
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+logging.getLogger().addHandler(console_handler)
+
+print("Logging is configured")
+
+@celery.task(bind=True)
+def send_email(self, email):
+    try:
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(EMAIL, PASSWORD)
+        
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL
+        msg['To'] = email
+        msg['Subject'] = "Subject: Test"
+        body = "This is the stage 3 task given by HNG internship."
+        msg.attach(MIMEText(body, 'plain'))
+
+        server.sendmail(EMAIL, email, msg.as_string())
+        server.quit()
+        
+        logging.info(f'Email sent to {email}')
+        print(f"Email sent to {email}")
+        return {'status': 'SUCCESS', 'email': email}  # Return the email address as the result
+    except Exception as e:
+        logging.error(f'Failed to send email to {email}: {e}')
+        print(f"Failed to send email to {email}: {e}")
+        self.retry(exc=e, countdown=60, max_retries=3)
+        return {'status': 'FAILURE', 'error': str(e)}
+
+######################
+
+# .env
+
+CELERY_BROKER_URL=amqp://guest:guest@localhost:5672//
+CELERY_RESULT_BACKEND=rpc://
+EMAIL=rufai_adeniyi@outlook.com
+PASSWORD=my_password
+SMTP_SERVER=smtp-mail.outlook.com
+SMTP_PORT=587
+
+
+# STEP 3
+
+# install requirements
+sudo apt update -y
+
+sudo apt install rabbitmq-server -y
+
+sudo systemctl enable rabbitmq-server
+
+sudo systemctl start rabbitmq-server
+
+sudo systemctl status rabbitmq-server
+
+sudo apt install python3-pip -y
+
+pip3 install celery flask
+
+# downlaod and install ngrok 
+
+wget https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-linux-amd64.zip
+sudo apt install unzip
+unzip ngrok-stable-linux-amd64.zip
+sudo mv ngrok /usr/local/bin/
+
+
+# Authenticate ngrok token
+ngrok authtoken <your-auth-token>
+
+# Run ngrok
+ngrok http 5000
+
+# It will provide a public URL that tunnels to your local application running on port 5000.
+
+# STEP 4
+############################# THIS IS TEST COMMANDS #############################
+
+# Create the messaging_system.log file in the var/log directory
+cd into var/log 
+
+touch messaging_system.log
+
+# give it read and write permissions
+sudo chmod 666 /var/log/messaging_system.log
+
+# cat to view the logs 
+cat /var/log/messaging_system.log
+
+# celery command to run 
+first, run celery -A tasks worker --loglevel=info
+
+# Then run python command
+run python3 app.py
+
+# Then run curl command to test in the terminal
+then run curl "https://064b-102-88-84-132.ngrok-free.app/?sendmail=kbneyo55@gmail.com&talktome=True"
+
+#########   OR on the web browser using ##############
+
+https://064b-102-88-84-132.ngrok-free.app/?sendmail=kbneyo55@gmail.com&talktome=True
+
+confirm the email was sent and received.
+
+
+# STEP 5
+configure nginx server to serve the app
+
+sudo apt install nginx -y
+
+sudo systemctl enable nginx
+
+sudo systemctl start nginx
+
+sudo systemctl status nginx
+
+sudo nano /etc/nginx/sites-available/flask_app
+
+replace the server block with the following to configure the server to serve the app
+
+server {
+    listen 80;
+    server_name localhost;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+
+    error_page 500 502 503 504 /50x.html;
+    location = /50x.html {
+        root /usr/share/nginx/html;
+    }
+}
+
+sudo systemctl restart nginx
+
+# command to run after nginx configuration
+http://localhost/?sendmail=kbneyo55@gmail.com&talktome=True
+
+get local application endpoint for external access
+
